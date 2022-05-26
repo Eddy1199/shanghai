@@ -1,0 +1,399 @@
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+     <title>SHANGHAI COVID SIMULATOR (C) 2022 Eddy Dong</title>
+     <title>eddy1199@qq.com</title>
+</head>
+<body bgcolor="black" style="margin:0">
+<canvas id="canvas"></canvas>
+</body>
+
+<script>
+const 
+	canvas = document.getElementById('canvas'),
+	W= window.innerWidth,
+	H= window.innerHeight,
+	ctx = canvas.getContext('2d');
+
+const
+	startingDate=new Date("March 1, 2022"), // starting date of the pandemic
+	interventionStartDay=45, // days into the pandemic when intervention starts
+	tileW=100, tileH=100, tileSize=4,
+	tileCount=tileW*tileH,
+	baseline=0,
+	timescale=5;
+
+
+////////////////////////////////////////////////
+/////////// SHANGHAI COVID SIMULATOR ///////////
+///////////   (C) 2022 Eddy Dong     ///////////
+///////////     eddy1199@qq.com      ///////////
+////////////////////////////////////////////////
+
+const
+	virusLongevityInHost=21, // BA2 survival days inside host
+	virusLongevityInEnv=7,	// BA2 survival days outside host
+	mobilitySkewness=0.7, // proportion of traveling within adjacent communities
+	population= 260000, // population index of Shanghai
+	scale=100, // times which we get the real population number
+	seedCases= 3, // positive case proportion in total population at the begining
+	infectionRate= 0.00252, // chance for a positive case to spread the virus to surrounding negative individuals in a day
+	vaccinationRate = 0.776, // vaccination rate : vaccine can ONLY reduce death rate and won't affect spreading rate
+	vaccinationEffectiveRate = 0.8; // chance for vaccinated people to resist BA2
+
+	otherDeathRatio= 0.000001, // severe disease hit rate per person per day
+	deathRateBA2=0.0016; // 1 death out of 10,000 positive cases
+
+var 
+	// [Quarantine Rate, Mobility Throttle[防范区, 管控区, 封控区], 
+	//	Quarantine Lag, Scenario Name]
+	scenarios=[
+	// Scenario #0: No Interference
+		[0.00, [1.00,1.00,1.00], 0, "No Intervention"],  	
+	// Scenario #1: Shanghai Strict Mode
+		[0.99, [0.10,0.05,0.01], 3, "Shanghai Strict Mode"],
+	// Scenario #2: Shanghai Loose Mode
+		[0.90, [0.40,0.05,0.01], 3, "Shanghai Loose Mode"],  
+	// Scenario #3: Global Coexist Mode
+		[0.30, [1.00,1.00,1.00], 7, "Global Coexist Mode"]   
+	],
+	// intervention approach applied since interventionStartDay
+	interference=3, 
+
+
+	timer,
+	tiles=[], // communities containing city population
+	people=[], // individual persons in the city, from #0 up to #260000
+	positiveCount=0,
+	accumulatedCases=0,
+	vaccinatedCount=0,
+	quarantineCount=0,
+	covidDeath=0,
+	otherDeath=0,
+	quarantineMax=0,
+	previousCurrentCases=0,
+	day=0, // day count for the simulation
+	populationPerTile = Math.round(population / tileCount), // population per tile	
+	durationPositive = 21, // total days in positive per COVID case	
+	
+	scenario=baseline;
+var
+	currentDate;
+
+var chartDailyNewCases=new Chart("Daily New Cases",405,60,330,45);
+var chartCurrentCases=new Chart("Concurrent Cases",405,140,330,45);
+var chartAccumulativeCases=new Chart("Accumulated Cases",405,220,330,45);
+var chartCovidDeath=new Chart("Accumulated Covid Death",405,300,330,45);
+var chartOtherDeath=new Chart("Other Death from Lockdown",405,380,330,45);
+
+function lockdown(){
+	scenario=interference;
+};
+	
+function init(){
+	var p;
+	for (var i=0; i<tileH; i++){
+		tiles.push([]);
+		for (var j=0; j<tileW; j++){
+			tiles[i].push(new Tile());
+		}
+	};
+	canvas.width=W; canvas.height=H;
+	for (var i=0; i<population; i++){
+		p=new People();
+		if (i < seedCases) {
+			p.status=1;
+			p.testedPositive=day;
+		};
+		people.push(p);
+		if (p.status==1) {
+			tiles[p.y][p.x].status=2; 
+			tiles[p.y][p.x].lastPositive=day;
+		};
+	};	
+	currentDate=new Date(startingDate.getTime());
+	currentDate.setDate(currentDate.getDate()+day);
+
+	scenario=baseline;
+};
+
+function update(){
+	var p;
+	covidDeath=0;
+	otherDeath=0;
+	positiveCount=0;
+	accumulatedCases=0;
+	quarantineCount=0;
+	immuneCount=0;
+	for (var i=0; i<population; i++) if (people[i].dead==0) {
+		p=people[i];
+		var xx,yy,moved=0;
+		if (Math.random()<scenarios[scenario][1][tiles[p.y][p.x].status]) { // if moving
+			if (Math.random()>mobilitySkewness) {
+				xx=Math.floor(Math.random()*tileW);
+				yy=Math.floor(Math.random()*tileH);
+				moved=2; // 30% chance moving to remote tiles
+			} else {
+				moved=1; // 70% chance moving to adjacent tiles
+			};
+		};
+		
+		// spreading
+// 		if (p.status==0 && !p.quarantined){
+// 			var x=p.x, y=p.y;
+// 			if (Math.random() < infectionRate && !p.vaccinated)
+// 				if (moved==0 && tiles[p.y][p.x].status>0 ||
+// 					(moved==2 && tiles[yy][xx].status>0) || (moved==1 &&
+// 				(  tiles[y][x].status>0
+// 				|| (x<tileW-1) && (tiles[y][x+1].status>0)
+// 				|| (x>0) && (tiles[y][x-1].status>0)
+// 				|| (y<tileH-1) && (tiles[y+1][x].status>0)
+// 				|| (y<tileH-1) && (x<tileW-1) && (tiles[y+1][x+1].status>0)
+// 				|| (y<tileH-1) && (x>0) && (tiles[y+1][x-1].status>0)
+// 				|| (y>0) && (tiles[y-1][x].status>0)
+// 				|| (y>0) && (x<tileW-1) && (tiles[y-1][x+1].status>0)
+// 				|| (y>0) && (x>0) && (tiles[y-1][x-1].status>0) ))) {
+// 					p.status=1;
+// 					p.testedPositive=day;
+// 					tiles[p.y][p.x].status=2; 
+// 					tiles[p.y][p.x].lastPositive=day;
+// 				};
+// 		};
+
+		// virus spreading
+		if (p.status==0 && !p.immune){
+			var x=p.x, y=p.y;
+			if (Math.random() < infectionRate)
+				if (moved==0 && tiles[y][x].lastPositive+virusLongevityInEnv>=day ||
+					(moved==2 && tiles[yy][xx].lastPositive+virusLongevityInEnv>=day) || (moved==1 &&
+				(  (x<tileW-1) && (tiles[y][x+1].lastPositive+virusLongevityInEnv>=day)
+				|| (x>0) && (tiles[y][x-1].lastPositive+virusLongevityInEnv>=day)
+				|| (y<tileH-1) && (tiles[y+1][x].lastPositive+virusLongevityInEnv>=day)
+				|| (y<tileH-1) && (x<tileW-1) && (tiles[y+1][x+1].lastPositive+virusLongevityInEnv>=day)
+				|| (y<tileH-1) && (x>0) && (tiles[y+1][x-1].lastPositive+virusLongevityInEnv>=day)
+				|| (y>0) && (tiles[y-1][x].lastPositive+virusLongevityInEnv>=day)
+				|| (y>0) && (x<tileW-1) && (tiles[y-1][x+1].lastPositive+virusLongevityInEnv>=day)
+				|| (y>0) && (x>0) && (tiles[y-1][x-1].lastPositive+virusLongevityInEnv>=day) ))) {
+					p.status=1;
+					p.testedPositive=day;
+					tiles[p.y][p.x].status=2; 
+					tiles[p.y][p.x].lastPositive=day;
+				};
+		};
+
+		//Quarantining
+		if (p.status==1 && !p.quarantined && (day-p.testedPositive)>=scenarios[scenario][2])
+			if (Math.random()<scenarios[scenario][0]) 
+				p.quarantined=1;
+				
+		// individual recovering, getting immuned or dead from Covid
+		if (p.status==1 && day-p.testedPositive>durationPositive){
+			p.status=0;
+			if (p.quarantined) p.quarantined=0;
+			p.immune=1;
+			var vaccineWorks= 0;
+			if (p.vaccinated && Math.random()<vaccinationEffectiveRate)
+				vaccineWorks=1;			
+			if (Math.random()<deathRateBA2 && !vaccineWorks) p.dead=1;
+		};
+		
+		// individual dead from other causes related to the lockdown
+		if (Math.random()<otherDeathRatio && 
+			Math.random()>scenarios[scenario][1][tiles[p.y][p.x].status]){
+			p.dead=2;
+		};
+		
+		// updating tile state
+		if (p.status==1 && !p.quarantined) {
+			tiles[p.y][p.x].lastPositive=day;
+		};
+		if (p.quarantined) quarantineCount++;
+		if (p.immune) immuneCount++;
+		if (p.status==1) positiveCount++;
+		if (p.testedPositive!=-1) accumulatedCases++;
+	} else {
+		if (people[i].dead==1) covidDeath++;
+		if (people[i].dead==2) otherDeath++;
+	};
+		
+	if (quarantineCount>quarantineMax) quarantineMax=quarantineCount;
+	// updating 3-phase segregation status
+	for (var i=0; i<tileH; i++){
+		for (var j=0; j<tileW; j++) if (tiles[i][j].status>0){
+			if (day-tiles[i][j].lastPositive>7) tiles[i][j].status=1;
+			if (day-tiles[i][j].lastPositive>14) tiles[i][j].status=0;
+		};
+	};
+
+	chartDailyNewCases.push(currentDate.toDateString(), positiveCount-previousCurrentCases);
+	chartCurrentCases.push(currentDate.toDateString(), positiveCount);
+	chartAccumulativeCases.push(currentDate.toDateString(), accumulatedCases);
+	chartCovidDeath.push(currentDate.toDateString(), covidDeath);
+	chartOtherDeath.push(currentDate.toDateString(), otherDeath);
+	
+	previousCurrentCases=positiveCount;
+};
+
+function render(){
+	var colorScheme=['#003300', '#ffaa00', '#ff0000'];
+	ctx.clearRect(0,0,W,H);
+	for (var i=0; i<tileH; i++){
+		for (var j=0; j<tileW; j++){
+			ctx.beginPath();
+			ctx.rect(j*tileSize,30+i*tileSize,tileSize-1,tileSize-1);
+			ctx.fillStyle=colorScheme[tiles[i][j].status];
+			ctx.fill(); 
+		};
+	};	
+
+	ctx.font="12px Verdana";
+	var v=20;
+	ctx.fillStyle="#ff8822";
+	ctx.fillText("Scenario: "+scenarios[scenario][3],10,20); 
+	ctx.fillStyle="#bbbbbb";
+	ctx.fillText("Day #"+day,270,20); 
+	ctx.fillText("Started: "+startingDate.toDateString(),360,20); 
+	ctx.fillText("Now: "+currentDate.toDateString(),540,20); 
+
+// 	ctx.font="14px Verdana";
+// 	ctx.fillStyle="#bbbbbb";
+// 	var v=20, sp=20;
+// 	ctx.fillText("Day "+day+" Since The Pandemic",tileW*tileSize+10,v); v+=sp*1.5;	
+// 	ctx.fillText("Starting Date: "+startingDate.toDateString(),tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Current Date: "+currentDate.toDateString(),tileW*tileSize+10,v); v+=sp*1.5;
+// 
+// 	ctx.fillText("LEGEND:",tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Green: Prevention (防范区)",tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Amber: Partial Lockdown (管控区)",tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Red: Complete Lockdown (封控区)",tileW*tileSize+10,v); v+=sp*1.5;
+// 
+// 	ctx.fillText("PARAMETERS:",tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Population: "+population*scale,tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Population Per Tile: "+populationPerTile*scale,tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Seed Cases: "+seedCases,tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Infection Rate: "+infectionRate,tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("BA2 Course of Disease: "+durationPositive+" days",tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("BA2 Environmental Longevity: "+virusLongevityInEnv+" days",tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Covid Death Rate: "+deathRateBA2,tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Lockdown Death Rate: "+otherDeathRatio,tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Vaccination Rate: "+vaccinationRate,tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Vaccination Effective Rate: "+vaccinationEffectiveRate,tileW*tileSize+10,v); v+=sp*1.5;
+// 
+// 	ctx.fillText("VARIABLES:",tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Lock Down Start on Day: "+lockStartingDay,tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Quarantine Lag: "+quarantineLag+" days",tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Quarantine Rate (Before/After): "+scenarios[baseline][0]+"/"+scenarios[interference][0],tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Mobility Before Lockdown: "+scenarios[baseline][1],tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Mobility After Lockdown: "+scenarios[interference][1],tileW*tileSize+10,v); v+=sp*1.5;
+// 
+// 	ctx.fillText("MONITORS:",tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Current Cases: "+positiveCount*scale,tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Accumulated Cases: "+accumulatedCases*scale,tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("In Quarantine: "+quarantineCount*scale,tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Max Quarantine Capacity: "+quarantineMax*scale,tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Naturally Immuned: "+vaccinatedCount*scale,tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Death of COVID: "+covidDeath*scale,tileW*tileSize+10,v); v+=sp;
+// 	ctx.fillText("Death of Lockdown: "+otherDeath*scale,tileW*tileSize+10,v); v+=sp*1.5;
+	
+	chartDailyNewCases.draw();
+	chartCurrentCases.draw();
+	chartAccumulativeCases.draw();
+	chartCovidDeath.draw();
+	chartOtherDeath.draw();
+};
+
+function People(){
+	this.status=0; // 0: negative 1: positive -1:dead
+	this.testedPositive=-1;
+	this.quarantined = 0;
+	this.vaccinated= Math.random() < vaccinationRate ? 1 : 0;
+	this.immune = 0;
+	this.dead=0; // 0: alive 1: dead from Covid 2: dead from other causes
+	this.x=Math.floor(Math.random()*tileW);
+	this.y=Math.floor(Math.random()*tileH);
+};
+
+function Tile(){
+	this.status=0; // 0:防范 1:管控 2:封控
+	this.lastPositive = -999;
+};
+
+function Chart(n,x,y,w,h){
+	this.x=x;
+	this.y=y;
+	this.w=w;
+	this.h=h;
+	this.max;
+	this.min;
+	this.data=[];
+	this.tickW;
+	this.maxY;
+	this.maxX;
+	this.maxXI;
+	this.name=n;
+};
+Chart.prototype.push=function(vx, vy){
+	this.data.push([vx, vy]);
+	if (this.max == null || this.max<vy) {
+		this.max=vy;
+		this.maxY=vy;
+		this.maxX=vx;
+		this.maxXI=this.data.length-1;
+	};
+	if (this.min == null || this.min>vy) {
+		this.min=vy;
+	};
+	this.tickW=this.w/this.data.length;
+};
+Chart.prototype.draw=function(){
+	if (this.data.length>1){
+	ctx.strokeStyle="#ee2222";
+	ctx.lineWidth=2;
+	ctx.beginPath();
+	ctx.moveTo(this.x,this.y+this.h
+		-this.h*(this.data[0][1]-this.min)/(this.max-this.min));
+	for (var i=1; i<this.data.length; i++){
+		ctx.lineTo(i*this.tickW+this.x,this.y+this.h
+			-this.h*(this.data[i][1]-this.min)/(this.max-this.min));
+	};
+	ctx.moveTo(this.x,this.y+this.h
+		-this.h*(this.data[0][1]-this.min)/(this.max-this.min));
+	ctx.closePath();
+	ctx.stroke();
+	};
+
+	ctx.strokeStyle="#888888";
+	ctx.lineWidth=0.7;
+	ctx.beginPath();
+	ctx.moveTo(this.x,this.y+this.h+1);
+	ctx.lineTo(this.x+this.w,this.y+this.h+1);
+	ctx.closePath();
+	ctx.stroke();
+
+	ctx.font="12px Verdana";
+	ctx.fillStyle="#bbbbbb";
+	ctx.fillText(this.name, this.x, this.y-5);
+	ctx.fillText("Max Y:"+this.maxY*scale, this.x+this.w-140, this.y-5);
+	var p=this.x+this.maxXI*this.tickW;
+	ctx.fillText("Max X:"+this.maxX, this.x, 
+			this.y+this.h-5);
+};
+
+function tick(){
+	currentDate=new Date(startingDate.getTime());
+	currentDate.setDate(currentDate.getDate()+day);
+	update();
+	render();
+	day++;
+	if (day==interventionStartDay) lockdown();
+	if (day>1 && positiveCount==0 && quarantineCount==0) {
+		clearInterval(timer);
+	}
+};
+
+init();
+render();
+onclick=function(){
+	timer=setInterval("tick()", 200/timescale);
+};
+
+</script>
